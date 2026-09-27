@@ -294,3 +294,36 @@ class GateFixtures(TempHome):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PatientCallersWaitOutTheRateLimit(TempHome):
+    """A backtest is not live: at the per-minute ceiling it waits, it does not skip the row."""
+
+    def test_patient_waits_and_then_decides(self):
+        from unittest import mock
+        answers = iter([(False, "skipped_rate"), (False, "skipped_rate"), (True, "ok")])
+        fake = Scripted({"worth": 0.9})
+        with mock.patch.object(engine.limits, "admit", side_effect=lambda shadow: next(answers)), \
+                mock.patch.object(engine.time, "sleep") as slept:
+            out = engine.decide({"t": 1}, CODE_FIRST, mode="shadow", transport=fake, patient=True)
+        self.assertEqual(out["action"], "wake")
+        self.assertEqual(slept.call_count, 2)
+
+    def test_a_live_caller_still_skips_at_once(self):
+        from unittest import mock
+        fake = Scripted({"worth": 0.9})
+        with mock.patch.object(engine.limits, "admit", return_value=(False, "skipped_rate")), \
+                mock.patch.object(engine.time, "sleep") as slept:
+            out = engine.decide({"t": 1}, CODE_FIRST, mode="shadow", transport=fake)
+        self.assertEqual(out["error"], "skipped_rate")
+        self.assertEqual(slept.call_count, 0)
+        self.assertEqual(fake.bodies, [])
+
+    def test_the_budget_cap_is_never_waited_out(self):
+        from unittest import mock
+        fake = Scripted({"worth": 0.9})
+        with mock.patch.object(engine.limits, "admit", return_value=(False, "skipped_budget")), \
+                mock.patch.object(engine.time, "sleep") as slept:
+            out = engine.decide({"t": 1}, CODE_FIRST, mode="shadow", transport=fake, patient=True)
+        self.assertEqual(out["error"], "skipped_budget")
+        self.assertEqual(slept.call_count, 0)

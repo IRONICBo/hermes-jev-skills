@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`jev batch` waits out the per-minute limit instead of skipping rows.** The first replay of real history through the landed engine (six sets, 3,100 rows, 6 workers) came back with 60% of rows `skipped_rate`: the shared limiter admits 800 shadow calls a minute and the batch ran faster. A patient caller now sleeps to the next minute (at most 5 times) and asks again; live callers still skip at once, and the daily dollar cap is never waited out. `jev gate replay --report` now also counts `no_opinion` rows, so a catch rate over rows Jev never judged cannot read as a pass.
+
 - GUI daily-use guard and live smoke: planned AX click/type steps now read back state before proceeding, stopping as `action_unverified` after one bounded settle when a driver acknowledgement leaves the window unchanged. A standalone macOS AppKit fixture smoke exercises the **bundled** Jev+Cua runner twice, with process cleanup and one activation/title-transition assertion per run. Fixture success does not establish Epic Launcher custom UI support; Epic navigation remains unverified.
 
 - GUI runner: exclude the global macOS menu and its descendants from app-navigation candidates. A chrome-only Epic Games Launcher AX snapshot previously offered `Epic Games Launcher` as a clickable menu item; Jev chose it with 0.91 confidence and Cua Driver refused it as outside the target window. The runner now stops without acting. Regression tests cover the actual window/menu ancestry shape. This does not resolve Cua Driver pixel clicks that reach the right Epic sidebar location but leave the page unchanged; those remain unverified and must not be reported as navigation.

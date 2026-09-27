@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Any, Dict, Mapping, Optional
 
 from . import client, ledger, limits, policy as policies, privacy
@@ -99,6 +100,9 @@ def _by_code(rules: Mapping[str, Any], pre: Mapping[str, Any], *, mode: str, fea
             "error": None, "status": "code", "fallback_used": False, "sent_to_jev": False, "source": "code"}
 
 
+PATIENT_RATE_WAITS = 5  # a patient caller (jev batch) waits out up to 5 full minutes
+
+
 def decide(
     state: Any,
     policy: Any,
@@ -163,6 +167,13 @@ def decide(
 
     if use_limits:
         allowed, reason = limits.admit(shadow=shadow)
+        waits = 0
+        while patient and not allowed and reason == "skipped_rate" and waits < PATIENT_RATE_WAITS:
+            # A backtest is not live: it waits for the next minute rather than skipping the row.
+            # Measured: one 3,100-row replay at 6 workers skipped 60% of rows as `skipped_rate`.
+            waits += 1
+            time.sleep(max(0.05, 60.0 - (time.time() % 60.0)) + 0.05)
+            allowed, reason = limits.admit(shadow=shadow)
         if not allowed:
             out = _fallback(rules, error=reason, mode=mode, feature=feature, started_label=label,
                             status="skipped")
