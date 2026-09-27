@@ -201,66 +201,92 @@ def _median(values: Sequence[float]) -> Optional[float]:
     return float(statistics.median(values)) if values else None
 
 
-def report(rows: Sequence[Mapping[str, Any]], *, host: str = "hermes", min_cell: int = 20,
-           top: str = "high") -> Dict[str, Any]:
-    """Tokens and success by the lane each task would get, against what actually ran.
+def effort_multipliers(rows: Sequence[Mapping[str, Any]], *, base: str = "medium", min_cell: int = 8) -> Dict[str, Any]:
+    """Tokens per task at each effort relative to ``base``, measured *within* each profile.
 
-    ``top`` is the effort an always-top-model policy would run everything at. Projected tokens
-    for a lane at effort ``e`` = the task's actual tokens x (median tokens/task at ``e``) /
-    (median tokens/task at the effort it ran at), both medians taken within that lane. A cell
-    with fewer than ``min_cell`` tasks is not used; the projection then keeps the actual tokens.
+    Effort was set per profile, so a fleet-wide median by effort mostly compares profiles. Here
+    each profile with at least ``min_cell`` tasks at both efforts contributes the ratio of its two
+    medians, and the ratios are pooled as a geometric mean weighted by the smaller cell.
+    """
+    cells: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        cells[str(row.get("profile"))][str(row.get("first_effort") or row.get("effort"))].append(float(row.get("tokens") or 0))
+    out: Dict[str, Any] = {base: {"multiplier": 1.0, "profiles": None, "weight": None}}
+    efforts = {e for profile in cells.values() for e in profile} - {base}
+    for effort in sorted(efforts):
+        logs, weights, used = 0.0, 0, []
+        for profile, by_effort in cells.items():
+            a, b = by_effort.get(effort) or [], by_effort.get(base) or []
+            if len(a) >= min_cell and len(b) >= min_cell:
+                ma, mb = statistics.median(a), statistics.median(b)
+                if ma > 0 and mb > 0:
+                    weight = min(len(a), len(b))
+                    logs += weight * math.log(ma / mb)
+                    weights += weight
+                    used.append(profile)
+        if weights:
+            out[effort] = {"multiplier": round(math.exp(logs / weights), 3), "profiles": len(used), "weight": weights}
+    return out
+
+
+def report(rows: Sequence[Mapping[str, Any]], *, host: str = "hermes", min_cell: int = 8,
+           top: str = "high") -> Dict[str, Any]:
+    """Tokens and first-try success by the lane each task would get, against what actually ran.
+
+    Projected tokens for a task moved from the effort it ran at to effort ``e`` = its actual
+    tokens x multiplier(e) / multiplier(ran), with multipliers from ``effort_multipliers``. An
+    effort with no measured multiplier keeps the actual tokens (said in ``unmeasured``), so the
+    projection never invents a saving. ``top`` is the effort an always-top-model policy uses.
     """
     mapped = lanes.targets(host)
+    mult = effort_multipliers(rows, min_cell=min_cell)
+    unmeasured: set = set()
+
+    def factor(ran: Optional[str], target: Optional[str]) -> float:
+        if not target or not ran or ran == target:
+            return 1.0
+        if ran not in mult or target not in mult:
+            unmeasured.add(target if target not in mult else ran)
+            return 1.0
+        return mult[target]["multiplier"] / mult[ran]["multiplier"]
+
     by_lane: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
-        decision = row.get("decision") or {}
-        by_lane[str(decision.get("action") or "unknown")].append(row)
-    out: Dict[str, Any] = {"tasks": len(rows), "host": host, "lane_map": mapped, "lanes": {},
-                           "sources": _count(r.get("decision", {}).get("source") for r in rows)}
+        by_lane[str((row.get("decision") or {}).get("action") or "unknown")].append(row)
+    order = lanes.LANES + ("keep_current", "unknown")
+    out: Dict[str, Any] = {"tasks": len(rows), "host": host, "lane_map": mapped, "effort_multipliers": mult,
+                           "lanes": {}, "sources": _count((r.get("decision") or {}).get("source") for r in rows)}
     actual_total = projected_total = top_total = 0.0
-    for lane, members in sorted(by_lane.items(), key=lambda kv: (lanes.LANES + ("keep_current", "unknown")).index(kv[0])
-                                if kv[0] in lanes.LANES + ("keep_current", "unknown") else 99):
-        medians = {}
-        by_effort: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
-        for row in members:
-            by_effort[str(row.get("effort") or "unknown")].append(row)
-        for effort, cell in by_effort.items():
-            if len(cell) >= min_cell:
-                medians[effort] = _median([float(r.get("tokens") or 0) for r in cell])
+    for lane in sorted(by_lane, key=lambda name: order.index(name) if name in order else 99):
+        members = by_lane[lane]
         target_effort = (mapped.get(lane) or {}).get("effort")
         actual = sum(float(r.get("tokens") or 0) for r in members)
-
-        def projected_at(effort: Optional[str]) -> float:
-            total = 0.0
-            for row in members:
-                ran = str(row.get("effort") or "unknown")
-                tokens = float(row.get("tokens") or 0)
-                if effort and effort in medians and ran in medians and medians[ran]:
-                    total += tokens * medians[effort] / medians[ran]
-                else:
-                    total += tokens
-            return total
-
-        lane_projected = projected_at(target_effort)
-        lane_top = projected_at(top)
+        projected = sum(float(r.get("tokens") or 0) * factor(r.get("first_effort") or r.get("effort"), target_effort)
+                        for r in members)
+        at_top = sum(float(r.get("tokens") or 0) * factor(r.get("first_effort") or r.get("effort"), top)
+                     for r in members)
         actual_total += actual
-        projected_total += lane_projected
-        top_total += lane_top
+        projected_total += projected
+        top_total += at_top
+        by_effort: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+        for row in members:
+            by_effort[str(row.get("first_effort") or row.get("effort") or "unknown")].append(row)
         out["lanes"][lane] = {
             "tasks": len(members), "share": round(len(members) / len(rows), 3) if rows else None,
-            "actual_tokens": int(actual), "projected_tokens_at_lane_effort": int(lane_projected),
-            "projected_tokens_always_top": int(lane_top), "target": mapped.get(lane),
-            "median_tokens_per_task_by_effort": {e: int(m) for e, m in sorted(medians.items())},
-            "success_by_effort": {effort: _rate(cell) for effort, cell in sorted(by_effort.items())},
+            "target": mapped.get(lane), "actual_tokens": int(actual),
+            "projected_tokens_at_lane_effort": int(projected), "projected_tokens_always_top": int(at_top),
             "success_all": _rate(members),
+            "success_by_effort_it_ran_at": {e: _rate(c) for e, c in sorted(by_effort.items())},
             "models": _count(m for r in members for m in (r.get("models") or [])),
         }
     out["totals"] = {
         "actual_tokens": int(actual_total), "projected_tokens_lanes": int(projected_total),
         "projected_tokens_always_top": int(top_total),
-        "saving_vs_actual": round(1 - projected_total / actual_total, 3) if actual_total else None,
-        "saving_vs_always_top": round(1 - projected_total / top_total, 3) if top_total else None,
+        "lanes_vs_actual": round(projected_total / actual_total - 1, 3) if actual_total else None,
+        "lanes_vs_always_top": round(projected_total / top_total - 1, 3) if top_total else None,
     }
+    if unmeasured:
+        out["unmeasured"] = sorted(unmeasured)
     return out
 
 

@@ -143,7 +143,7 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("--days", type=float, default=0, help="replay-build: only tasks created in the last N days")
     p.add_argument("--limit", type=int, default=0, help="replay-build: only the newest N tasks")
     p.add_argument("--rows", help="replay-report: decisions from jev batch --policy lane")
-    p.add_argument("--min-cell", type=int, default=20, help="replay-report: smallest effort cell used")
+    p.add_argument("--min-cell", type=int, default=8, help="replay-report: smallest effort cell used")
     p.add_argument("--top-effort", default="high", help="replay-report: the always-top-model effort")
     p.add_argument("--check-timeout", type=float, default=lanes.CHECK_TIMEOUT)
     p.set_defaults(func=cmd_lane)
