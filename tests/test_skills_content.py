@@ -134,6 +134,36 @@ class SocialResearchSkillTests(unittest.TestCase):
         self.assertIn("**Social research skill**", readme)
         self.assertIn("no new request shape", readme)
 
+    def test_social_research_gates_people_before_projection_and_fails_open_locally(self):
+        body = read("jev-social-research")
+        gate = body.index("## Mandatory local gate before any Jev call")
+        person_check = body.index("A\n   public URL is still person-marked", gate)
+        stop = body.index("If any field is private, person-marked or sensitive, stop", person_check)
+        zero_calls = body.index("Make zero Jev calls", stop)
+        screened_head = body.index("selected set only the locally screened head", zero_calls)
+        projection = body.index("Only an all-clear set may be reduced to the outbound projection", screened_head)
+        unavailable = body.index("If an allowed `jev search` call is unavailable", projection)
+        workflow = body.index("## One bounded run", unavailable)
+        first_call = body.index("then run `jev search`", workflow)
+        final_gate = body.index("Re-run the mandatory gate", first_call)
+        final_call = body.index("run a separate `jev search` round", final_gate)
+        self.assertLess(gate, workflow)
+        self.assertLess(person_check, stop)
+        self.assertLess(stop, zero_calls)
+        self.assertLess(zero_calls, screened_head)
+        self.assertLess(screened_head, projection)
+        self.assertLess(projection, unavailable)
+        self.assertLess(workflow, first_call)
+        self.assertLess(first_call, final_gate)
+        self.assertLess(final_gate, final_call)
+        self.assertIn("complete URL is not person-marked", body)
+        self.assertIn("Fail-open never restores a\n   locally rejected entry", body)
+        self.assertIn("person-marked results never enter the Jev projection", body)
+        self.assertIn("fail-open means continuing locally rather than sending less-safe data", body)
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("only when that complete URL is not person-marked", readme)
+        self.assertIn("the locally screened head of the original order", readme)
+
     def test_social_research_is_discoverable_and_distinct_from_adjacent_skills(self):
         from jevkit import skillpick
         shipped = {skill["name"]: skill for skill in skillpick.discover([SKILLS])}

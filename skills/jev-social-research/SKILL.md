@@ -30,6 +30,25 @@ Track evidence depth explicitly. One source may carry more than one level:
 An empty search page means no accessible result was observed for that query. It does not
 prove that the topic has no discussion.
 
+## Mandatory local gate before any Jev call
+
+Apply this gate before constructing or serializing every outbound request:
+
+1. Mark the question, every tried or candidate query and every candidate field locally. A
+   public URL is still person-marked when its path, slug or query identifies an account or
+   person; being public does not make it non-identifying.
+2. If any field is private, person-marked or sensitive, stop. Make zero Jev calls and do not
+   silently drop the marked row and send the remainder. Keep the complete local ledger, but
+   make the selected set only the locally screened head of the original order, excluding
+   every locally rejected entry, then use the agent's ordinary no-Jev judgment.
+3. Only an all-clear set may be reduced to the outbound projection and passed to `jev search`.
+4. If an allowed `jev search` call is unavailable, times out or returns `unknown`, keep the
+   local ledger intact and take that same screened-head baseline. Fail-open never restores a
+   locally rejected entry and never relaxes the privacy gate.
+
+This ordering is the privacy boundary: person-marked results never enter the Jev projection,
+and fail-open means continuing locally rather than sending less-safe data.
+
 ## One bounded run
 
 1. **Set the evidence floor and the budget before searching.** Name the platforms, the
@@ -37,10 +56,12 @@ prove that the topic has no discussion.
    media are required, and a wall-clock limit. Reaching a limit produces a partial report;
    it does not silently lower the floor.
 2. **Discover and rank.** Ask the routing question, “Which discovered sources should be
-   opened to meet this evidence floor?” Convert each card to the minimal outbound projection
-   below, then run `jev search`. An `answer` means the cards are enough to make that routing
-   choice: open its `selected_ids`. It does not mean the research is complete. On `unknown`,
-   use the screened head of the original order, which is the `jev-search` fail-open path.
+   opened to meet this evidence floor?” Run the mandatory gate above on the question, queries
+   and cards. Only after an all-clear result, convert each card to the minimal outbound projection
+   below, then run `jev search`. An `answer` means the cards are enough to make
+   that routing choice: open its `selected_ids`. It does not mean the research is complete.
+   If the gate stops the call or Jev returns `unknown`, use the locally screened head of the
+   original order, which is the `jev-search` fail-open path.
 3. **Open only selected sources.** Fetch them, or load and follow `jev-browser-use` before
    any browser navigation. Its critical rules still apply: allowlist the hosts, use a
    separate automation-owned browser profile, never operate on a page showing credentials,
@@ -72,12 +93,12 @@ prove that the topic has no discussion.
 6. **Check the floor locally.** Compute `coverage_met` from the ledger counts and required
    evidence levels. Code owns this check. Jev is never asked to infer it. While it is false,
    continue within the predeclared budget even if a discovery-routing call returned `answer`.
-7. **Ask whether to stop only after `coverage_met` is true.** Run a separate `jev search`
-   round with the research question, the minimal evidence projections below, and candidate
-   queries for what is still missing. Pass the increasing `round_index` and the predeclared
-   `max_rounds`. If any selected source stayed unreadable after its one retry, also pass
-   `"reading_failed": true`; from round 2 this bounds the loop as `answer_from_what_we_have`.
-   Follow every result as defined by `jev-search`.
+7. **Ask whether to stop only after `coverage_met` is true.** Re-run the mandatory gate on
+   the research question, minimal evidence candidates and queries for what is still missing.
+   Only after it clears, run a separate `jev search` round. Pass the increasing `round_index`
+   and the predeclared `max_rounds`. If any selected source stayed unreadable after its one
+   retry, also pass `"reading_failed": true`; from round 2 this bounds the loop as
+   `answer_from_what_we_have`. Follow every result as defined by `jev-search`.
 
 ## The only social evidence sent to Jev
 
@@ -85,7 +106,7 @@ The full ledger is local. For each `jev search` call, derive a fresh outbound re
 
 - an opaque local `id`;
 - `title`: platform plus evidence level, without an account handle;
-- `url`: the canonical **public** source URL, which may itself expose a public account name;
+- `url`: the canonical **public** source URL only when the complete URL is not person-marked;
 - `snippet`: at most 900 characters of source-grounded paraphrase and coverage tags, without
   direct comment text, engagement counts or timestamps.
 
