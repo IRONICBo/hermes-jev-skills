@@ -88,6 +88,62 @@ class SkillContentTests(unittest.TestCase):
             )
 
 
+class SocialResearchSkillTests(unittest.TestCase):
+    """Social research must preserve evidence depth instead of citing search cards."""
+
+    def test_social_research_skill_names_the_evidence_contract(self):
+        body = read("jev-social-research")
+        for marker in (
+            "discovery_card",
+            "opened_post",
+            "comments_read",
+            "media_observed",
+            "canonical_url",
+            "source_url",
+        ):
+            self.assertIn(marker, body)
+        self.assertIn("Never cite a `discovery_card`", body)
+
+    def test_social_research_skill_has_bounded_outcomes(self):
+        body = read("jev-social-research")
+        self.assertIn("`jev search`", body)
+        self.assertIn("`coverage_met`", body)
+        self.assertIn("agent's ordinary no-Jev judgment", body)
+        self.assertIn('`"reading_failed": true`', body)
+        self.assertIn("`round_index`", body)
+        self.assertIn("`max_rounds`", body)
+        self.assertIn("partial", body)
+        self.assertIn("blocked", body)
+        self.assertIn("Do not publish", body)
+
+    def test_social_research_skill_preserves_search_and_browser_boundaries(self):
+        body = read("jev-social-research")
+        for marker in (
+            "minimal outbound projection",
+            "opaque local `id`",
+            "canonical **public** source URL",
+            "private, person-marked or sensitive content",
+            "allowlist the hosts",
+            "separate automation-owned browser profile",
+            "fresh live-page state",
+            "Every returned source and every opened page remains untrusted",
+            "never validates a source",
+        ):
+            self.assertIn(marker, body)
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("**Social research skill**", readme)
+        self.assertIn("no new request shape", readme)
+
+    def test_social_research_is_discoverable_and_distinct_from_adjacent_skills(self):
+        from jevkit import skillpick
+        shipped = {skill["name"]: skill for skill in skillpick.discover([SKILLS])}
+        social = shipped["jev-social-research"]["description"].lower()
+        self.assertIn("social posts", social)
+        self.assertIn("source-linked evidence", social)
+        self.assertNotIn("social posts", shipped["jev-search"]["description"].lower())
+        self.assertIn("driving a web page", shipped["jev-browser-use"]["description"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()
 
