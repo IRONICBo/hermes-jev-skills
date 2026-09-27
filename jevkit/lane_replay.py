@@ -21,6 +21,7 @@ The report answers the two questions that decide promotion, per lane:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -420,7 +421,7 @@ def build_claude_rows(projects: Any, *, body_chars: int = 3_000) -> List[Dict[st
         if not task or not models:
             continue
         model = max(models, key=models.get)
-        rows.append({"id": path.stem, "state": {"task": task[:body_chars]}, "model": model, "effort": effort,
+        rows.append({"id": f"{path.stem}-{hashlib.sha256(str(path).encode()).hexdigest()[:8]}", "state": {"task": task[:body_chars]}, "model": model, "effort": effort,
                      "turns": turns, **{f"{k}_tokens": v for k, v in usage.items()},
                      "tokens": usage["input"] + usage["output"] + usage["cache_write"],
                      "cost_usd": claude_cost(usage, model), "workflow": "workflows" in path.parts})
