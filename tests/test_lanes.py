@@ -74,7 +74,7 @@ class Classify(TempHome):
         (self.home / "jev" / "lanes.json").write_text(json.dumps(
             {"hermes": {"small": {"model": "gpt-reserve"}}, "claude-code": {"nonsense": {"model": "x"}}}))
         mapped = lanes.targets("hermes")
-        self.assertEqual(mapped["small"], {"provider": "openai-codex", "model": "gpt-reserve", "effort": "low"})
+        self.assertEqual(mapped["small"], {"provider": "openai-codex", "model": "gpt-reserve", "effort": "medium"})
         self.assertEqual(sorted(lanes.targets("claude-code")), sorted(lanes.LANES))
 
 

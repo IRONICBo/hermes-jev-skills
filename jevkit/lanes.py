@@ -47,10 +47,12 @@ TARGETS: Dict[str, Dict[str, Dict[str, str]]] = {
         "escalate": {"agent": "jev-lane-escalate", "model": "opus", "effort": "high"},
     },
     # Hermes Kanban tasks carry a per-task model_override and reasoning_effort, so a lane is two
-    # fields on the card. The defaults keep every lane on the fleet's subscription model and move
-    # effort only; a smaller model for `small` belongs in lanes.json once shadow rows prove it.
+    # fields on the card. Calibrated on one fleet's 2,357 real tasks (docs/lanes.md): the smaller
+    # model matched the default on the cards it was given with fewer tokens, while raising effort
+    # up front cost ~1.8x tokens with no first-try gain, and low effort cost more, not less
+    # (more turns). So the small lane changes the model, not the effort. Override in lanes.json.
     "hermes": {
-        "small": {"provider": "openai-codex", "model": "gpt-6-sol", "effort": "low"},
+        "small": {"provider": "openai-codex", "model": "gpt-5.6-luna", "effort": "medium"},
         "medium": {"provider": "openai-codex", "model": "gpt-6-sol", "effort": "medium"},
         "high": {"provider": "openai-codex", "model": "gpt-6-sol", "effort": "high"},
         "escalate": {"provider": "openai-codex", "model": "gpt-6-astra", "effort": "high"},
