@@ -156,6 +156,9 @@ def build_rows(kanban_db: Any, hermes_root: Any, *, since: Optional[float] = Non
             "reasoning_tokens": sum(s["reasoning"] for _, s in joined),
             "cost_usd": round(sum(s["cost"] for _, s in joined), 6),
             "outcome": outcome_class([r.get("outcome") for r in task_runs], task.get("status")),
+            "first_try_success": (task_runs[0].get("outcome") in SUCCESS),
+            "failed_runs": sum(1 for r in task_runs if r.get("outcome") in FAILED),
+            "first_effort": efforts[0],
             "created_at": task.get("created_at"),
         })
     rows.sort(key=lambda row: row.get("created_at") or 0)
@@ -183,10 +186,15 @@ def wilson(successes: int, total: int, z: float = 1.96) -> Optional[List[float]]
 
 
 def _rate(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    judged = [r for r in rows if r.get("outcome") in ("success", "failed")]
+    """Finished at all, and finished on the first run (the stricter signal: a task that needed a
+    retry cost a second run even if it finished in the end)."""
+    judged = [r for r in rows if r.get("outcome") in ("success", "failed", "blocked")]
     wins = sum(1 for r in judged if r["outcome"] == "success")
-    return {"n": len(rows), "judged": len(judged), "success_rate": round(wins / len(judged), 3) if judged else None,
-            "ci95": wilson(wins, len(judged))}
+    first = sum(1 for r in rows if r.get("first_try_success"))
+    return {"n": len(rows), "finished_rate": round(wins / len(judged), 3) if judged else None,
+            "first_try_rate": round(first / len(rows), 3) if rows else None,
+            "first_try_ci95": wilson(first, len(rows)),
+            "failed_runs_per_task": round(sum(int(r.get("failed_runs") or 0) for r in rows) / len(rows), 3) if rows else None}
 
 
 def _median(values: Sequence[float]) -> Optional[float]:
