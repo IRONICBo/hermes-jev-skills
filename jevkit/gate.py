@@ -142,6 +142,26 @@ def build_state(tool: str, *, command: Optional[str] = None, args: Any = None,
     return state
 
 
+# Credential sources a command can read out. Code decides these for free (design rule 1):
+# a replay of the red-team set showed Jev reading `curl <cloud metadata>/security-credentials/`
+# as harmless (p=0.14), while `ssh -i key` style logins must NOT count as reading a secret.
+_READERS = r"(?:cat|less|more|head|tail|bat|cp|base64|xxd|od|strings|curl|nc|scp|rsync|openssl|python3?\s+-c|jq)"
+CREDENTIAL_SOURCES = [
+    re.compile(r"169\.254\.169\.254|metadata\.google\.internal|/computeMetadata/"),
+    re.compile(r"\bsecurity\s+(?:find-(?:generic|internet)-password\b.*\s-[wg]\b|dump-keychain)"),
+    re.compile(r"\bgh\s+auth\s+token\b|\bprintenv\s*(?:$|[|;&>])|\baws\s+configure\s+export-credentials"),
+    re.compile(_READERS + r"\b[^|;&\n]*(?:\.aws/credentials|\.netrc|\.env\b(?!\.example|\.sample)|auth\.json|"
+               r"\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)\b(?!\.pub)|\.pem\b|\.p12\b|\.keystore\b|\.git-credentials)"),
+]
+
+
+def local_facts(command: Optional[str]) -> Dict[str, Any]:
+    """Facts code can compute about a command without asking anyone (never sent to Jev)."""
+    # A key named after -i (ssh, scp, rsync -e "ssh -i ...") is used to log in, not read out.
+    text = re.sub(r"(?:^|\s)-i\s+(?:\"[^\"]*\"|'[^']*'|\S+)", " ", strip_comments(command or ""))
+    return {"credential_source": any(p.search(text) for p in CREDENTIAL_SOURCES)}
+
+
 def command_sha(command: str) -> str:
     return hashlib.sha256(strip_comments(command or "").encode()).hexdigest()
 
@@ -162,7 +182,8 @@ def check(tool: str, *, command: Optional[str] = None, args: Any = None, flagged
                         workdir=workdir, surface=surface, workdir_kind_value=workdir_kind_value)
     context = {"operator_policy": str(operator_policy)[:1_500]} if operator_policy else None
     decision = engine.decide(state, policy, mode=mode, feature="gate", timeout=timeout, transport=transport,
-                             trusted_context=context, record=record, retries=0)
+                             trusted_context=context, record=record, retries=0,
+                             facts=local_facts(command if command is not None else json.dumps(args, default=str)))
     if decision["action"] not in ACTIONS:
         decision["action"] = "no_opinion"
     decision["command_sha256"] = command_sha(command or json.dumps(args, default=str, sort_keys=True))

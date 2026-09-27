@@ -20,10 +20,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
+import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .jevkit import catalog, choose, compact, effort, keystore, ladder, rerank, route, search, skillpick, supervise, turn, webscreen
 from .jevkit import decide as policy_engine, evaluate, gate, policy as policies, route_to, shadowq, switches
@@ -374,6 +376,10 @@ def _feedback_accepted(name: str, token: str) -> None:
 def _on_post_tool_call(tool_name: str = "", args: Any = None, session_id: str = "", status: Any = None,
                        **_: Any) -> None:
     """Remember what a session loaded; settle the pending suggestion if this was it."""
+    try:
+        _policy_shadow_tool(tool_name, args, session_id, status)
+    except Exception:  # noqa: BLE001 - a shadow must never touch the tool it watches
+        pass
     if tool_name != "skill_view" or status == "error":
         return None
     name = _bare((args or {}).get("name") if isinstance(args, dict) else "")
@@ -782,6 +788,197 @@ def _on_post_approval_response(command: str = "", choice: str = "", session_key:
     return None
 
 
+# ── policy shadows on Kanban events and shell commands (each off until switched to shadow) ──
+#
+# Log-only. Each hook queues its work on the shadow thread and returns at once; the job asks
+# Jev in `shadow` mode and writes ids, hashes and probabilities to logs/jev-shadow.jsonl. The
+# outcome (did the retry finish, who cleared the block, was the card reopened) is joined later
+# from kanban.db by the operator's own report job, so nothing here waits for it. Which policy a
+# feature uses is `<feature>_policy` in jev/state.json (a tuned local policy can be dropped in
+# <hermes root>/jev/policies/) — the shipped one otherwise. Kill switch: <root>/jev/<FEATURE>_OFF.
+
+_SHADOW_POLICY = {"retry": "retry", "blockcheck": "blockcheck", "kanban_done": "kanban-done",
+                  "owner": "owner", "gate_all": "gate-ask"}
+_GATE_ALL_TOOLS = ("terminal", "execute_code")
+_DRAIN_REGISTERED = False
+
+
+def _shadow_policy(feature: str) -> str:
+    return str(switches.state().get(f"{feature}_policy") or _SHADOW_POLICY[feature])
+
+
+def _shadow_log(entry: Dict[str, Any]) -> None:
+    """Ids, hashes, actions and probabilities only. Never the card, the command or the summary."""
+    try:
+        path = _home() / "logs" / "jev-shadow.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {"ts": round(time.time(), 3), "profile": _profile(), **entry}
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, separators=(",", ":"), default=str) + "\n")
+    except OSError:
+        pass
+
+
+def _drain_at_exit() -> None:
+    """A Kanban worker can exit right after its hook fires: give queued shadow work 2 s."""
+    global _DRAIN_REGISTERED
+    if _DRAIN_REGISTERED:
+        return
+    _DRAIN_REGISTERED = True
+    try:
+        import atexit
+        atexit.register(lambda: shadowq._QUEUE.drain(2.0))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _decision_row(feature: str, decision: Mapping[str, Any], **ids: Any) -> Dict[str, Any]:
+    return {"kind": "shadow", "feature": feature, **ids, "action": decision.get("action"),
+            "source": decision.get("source"), "answers": decision.get("answers"),
+            "policy": decision.get("policy"), "jev_model": decision.get("jev_model"),
+            "drift": decision.get("drift"), "latency_ms": decision.get("latency_ms"),
+            "input_tokens": decision.get("input_tokens"), "status": decision.get("status"),
+            "error": decision.get("error"), "state_sha256": decision.get("state_sha256"),
+            "queue_dropped": shadowq.dropped()}
+
+
+_BUDGET_RE = re.compile(r"iteration budget exhausted|max(imum)? iterations reached", re.I)
+_RATE_RE = re.compile(r"\b(rate.?limit|429|quota|usage limit|unauthori[sz]ed|401|invalid api key|login expired)\b", re.I)
+_CARD_RE = re.compile(r"\bt_[0-9a-f]{8}\b")
+
+
+def _kanban_rows(task_id: str, board: Optional[str]) -> Tuple[Any, List[Any]]:
+    from hermes_cli import kanban_db as kb  # the host's own API; only SELECTs run here
+    with kb.connect_closing(board=board) as conn:
+        return kb.get_task(conn, task_id), kb.list_runs(conn, task_id)
+
+
+def _fingerprint(text: Any) -> str:
+    value = re.sub(r"[0-9a-f]{6,}", "#", str(text or "").lower())
+    value = re.sub(r"\d+", "n", value)
+    return re.sub(r"\s+", " ", re.sub(r"/[^\s]+", "/p", value)).strip()[:120]
+
+
+def _retry_job(payload: Dict[str, Any]) -> None:
+    if switches.mode("retry") == "off":
+        return
+    task, runs = _kanban_rows(str(payload["task_id"]), payload.get("board"))
+    run = next((r for r in reversed(runs) if str(r.id) == str(payload.get("run_id"))), runs[-1] if runs else None)
+    if run is None:
+        return
+    closed = [r for r in runs if r.ended_at is not None and r.id != run.id]
+    text = f"{run.error or ''}\n{run.summary or ''}"
+    same = bool(closed) and _fingerprint(closed[-1].error) == _fingerprint(run.error) and bool(run.error)
+    facts = {"budget_exhausted": bool(_BUDGET_RE.search(text)), "rate_limited_or_auth": bool(_RATE_RE.search(text)),
+             "same_error_as_last_attempt": same}
+    state = {"outcome": payload.get("outcome") or run.outcome, "exit_kind": payload.get("exit_kind"),
+             "error_tail": str(run.error or "")[-600:], "summary_tail": str(run.summary or "")[-600:],
+             "card_title": str(getattr(task, "title", "") or "")[:200],
+             "card_body_head": str(getattr(task, "body", "") or "")[:600],
+             "attempt_number": len(closed) + 1, **facts}
+    decision = policy_engine.decide(state, _shadow_policy("retry"), mode="shadow", feature="retry", timeout=4.0,
+                                    facts=facts)
+    _shadow_log(_decision_row("retry", decision, task_id=payload["task_id"], run_id=run.id,
+                              outcome=state["outcome"], exit_kind=payload.get("exit_kind"),
+                              baseline_hold=same))
+
+
+def _blockcheck_job(payload: Dict[str, Any]) -> None:
+    if switches.mode("blockcheck") == "off":
+        return
+    task, runs = _kanban_rows(str(payload["task_id"]), payload.get("board"))
+    reason = str(payload.get("reason") or "")
+    if reason.startswith("paused_by_steve"):
+        return
+    summaries = [r.summary for r in runs if r.summary]
+    ids = sorted(set(_CARD_RE.findall(reason)) - {str(payload["task_id"])})
+    state = {"block_kind": str(payload.get("kind") or "untyped"), "reason": reason[:1200],
+             "card_title": str(getattr(task, "title", "") or "")[:200],
+             "last_summary": str(summaries[-1] if summaries else "")[-1200:], "mentions_card_ids": bool(ids)}
+    decision = policy_engine.decide(state, _shadow_policy("blockcheck"), mode="shadow", feature="blockcheck",
+                                    timeout=4.0, facts={"mentions_card_ids": bool(ids)})
+    _shadow_log(_decision_row("blockcheck", decision, task_id=payload["task_id"], run_id=payload.get("run_id"),
+                              baseline_not_owner=bool(ids)))
+
+
+def _kanban_done_job(payload: Dict[str, Any]) -> None:
+    if switches.mode("kanban_done") == "off":
+        return
+    task, _runs = _kanban_rows(str(payload["task_id"]), payload.get("board"))
+    state = {"card_title": str(getattr(task, "title", "") or "")[:200],
+             "card_body_head": str(getattr(task, "body", "") or "")[:1200],
+             "summary": str(payload.get("summary") or "")[-2000:]}
+    decision = policy_engine.decide(state, _shadow_policy("kanban_done"), mode="shadow", feature="kanban_done",
+                                    timeout=4.0)
+    _shadow_log(_decision_row("kanban_done", decision, task_id=payload["task_id"], run_id=payload.get("run_id")))
+
+
+def _kanban_hook(feature: str, job: Callable[[Dict[str, Any]], None]) -> Callable[..., None]:
+    def hook(task_id: str = "", **extra: Any) -> None:
+        try:
+            if not task_id or switches.mode(feature) == "off":
+                return None
+            _drain_at_exit()
+            shadowq.submit(_safe_job, feature, job, {"task_id": task_id, **{
+                k: v for k, v in extra.items() if isinstance(v, (str, int, float, bool, type(None)))}})
+        except Exception:  # noqa: BLE001 - an observer never touches the board it watches
+            pass
+        return None
+    return hook
+
+
+def _safe_job(feature: str, job: Callable[[Dict[str, Any]], None], payload: Dict[str, Any]) -> None:
+    try:
+        job(payload)
+    except Exception as error:  # noqa: BLE001
+        _shadow_log({"kind": "shadow", "feature": feature, "task_id": payload.get("task_id"),
+                     "status": "error", "error": type(error).__name__})
+
+
+def _owner_options() -> Optional[Dict[str, str]]:
+    """{profile: one-line description}, kept by the operator in <root>/jev/owner-options.json."""
+    try:
+        data = json.loads((switches.jev_dir(True) / "owner-options.json").read_text(encoding="utf-8"))
+        return {str(k): str(v)[:200] for k, v in data.items()} if isinstance(data, dict) and data else None
+    except (OSError, ValueError):
+        return None
+
+
+def _owner_job(payload: Dict[str, Any]) -> None:
+    options = _owner_options()
+    if switches.mode("owner") == "off" or not options:
+        return
+    state = {"title": str(payload.get("title") or "")[:200], "body": str(payload.get("body") or "")[:1500]}
+    decision = policy_engine.decide(state, _shadow_policy("owner"), mode="shadow", feature="owner", timeout=4.0,
+                                    choices={"owner": options})
+    _shadow_log(_decision_row("owner", decision, title_sha256=_digest(state["title"]),
+                              creator_pick=payload.get("assignee")))
+
+
+def _gate_all_job(payload: Dict[str, Any]) -> None:
+    decision = gate.check(payload["tool"], command=payload.get("command"), args=payload.get("args"),
+                          policy=_shadow_policy("gate_all"), mode="shadow", timeout=1.5, record=True,
+                          operator_policy=_smart_policy())
+    _shadow_log(_decision_row("gate_all", decision, tool=payload["tool"], session=_digest(payload.get("session")),
+                              command_sha256=decision.get("command_sha256"), tool_status=payload.get("status")))
+
+
+def _policy_shadow_tool(tool_name: str, args: Any, session_id: str, status: Any) -> None:
+    """post_tool_call: sample shell commands for the gate shadow; see new cards for the owner shadow."""
+    if tool_name in _GATE_ALL_TOOLS and switches.mode("gate_all") == "shadow" and isinstance(args, dict):
+        rate = switches.state().get("gate_all_sample", 0.2)
+        rate = float(rate) if isinstance(rate, (int, float)) and not isinstance(rate, bool) else 0.2
+        if random.random() < max(0.0, min(1.0, rate)):
+            command = args.get("command") if tool_name == "terminal" else args.get("code")
+            if isinstance(command, str) and command.strip():
+                shadowq.submit(_safe_job, "gate_all", _gate_all_job,
+                               {"tool": tool_name, "command": command, "session": session_id,
+                                "status": str(status)[:20] if status is not None else None})
+    elif tool_name == "kanban_create" and switches.mode("owner") == "shadow" and isinstance(args, dict):
+        shadowq.submit(_safe_job, "owner", _owner_job, {"title": args.get("title"), "body": args.get("body"),
+                                                        "assignee": args.get("assignee")})
+
 # ── policy tools (only when `/jev decide_tools on` was set before the gateway started) ──
 
 def _decide_tool(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -833,7 +1030,7 @@ def _jev_command(raw_args: str = "") -> str:
         except ValueError as error:
             return str(error)
         scope = "the default for EVERY profile (a profile's own setting still wins)" if everyone else f"set for {_profile()}"
-        note = ("" if words[0] not in ("gate", "decide_tools") else
+        note = ("" if words[0] not in ("gate", "decide_tools", "retry", "blockcheck", "kanban_done") else
                 " Hooks and tools load when the gateway starts; switching off works at once.")
         if switches.kill_switch(words[0]).exists():
             note += f" The kill switch {switches.kill_switch(words[0]).name} exists, so it stays off."
@@ -898,6 +1095,11 @@ def register(ctx: Any) -> None:
         # (jevkit/gate.py) with no host seam wired yet, so they observe like shadow here.
         ctx.register_hook("pre_approval_request", _on_pre_approval_request)
         ctx.register_hook("post_approval_response", _on_post_approval_response)
+    for feature, event, job in (("retry", "on_kanban_worker_exited", _retry_job),
+                                ("blockcheck", "kanban_task_blocked", _blockcheck_job),
+                                ("kanban_done", "kanban_task_completed", _kanban_done_job)):
+        if switches.mode(feature) != "off":
+            ctx.register_hook(event, _kanban_hook(feature, job))
     ctx.register_middleware("llm_request", _on_llm_request)
     ctx.register_command("jev", _jev_command, description="Jev status and switches",
                          args_hint="[routing|skills|notice|screen on|shadow|off [all]] [gate off|shadow] [decide_tools on|off]")
