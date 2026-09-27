@@ -48,13 +48,15 @@ TARGETS: Dict[str, Dict[str, Dict[str, str]]] = {
     },
     # Hermes Kanban tasks carry a per-task model_override and reasoning_effort, so a lane is two
     # fields on the card. Calibrated on one fleet's 2,357 real tasks (docs/lanes.md): the smaller
-    # model matched the default on the cards it was given with fewer tokens, while raising effort
-    # up front cost ~1.8x tokens with no first-try gain, and low effort cost more, not less
-    # (more turns). So the small lane changes the model, not the effort. Override in lanes.json.
+    # model matched the default on the cards it was given with ~40% fewer tokens; raising effort up
+    # front cost ~1.8x tokens with no first-try gain, even on the cards Jev called hard; and low
+    # effort cost more, not less (more turns). So `small` changes the model, `high` keeps the
+    # default until a fleet's own shadow rows show effort paying for itself, and only `escalate`
+    # (reached on evidence, never up front by habit) buys the strongest model. Override in lanes.json.
     "hermes": {
         "small": {"provider": "openai-codex", "model": "gpt-5.6-luna", "effort": "medium"},
         "medium": {"provider": "openai-codex", "model": "gpt-6-sol", "effort": "medium"},
-        "high": {"provider": "openai-codex", "model": "gpt-6-sol", "effort": "high"},
+        "high": {"provider": "openai-codex", "model": "gpt-6-sol", "effort": "medium"},
         "escalate": {"provider": "openai-codex", "model": "gpt-6-astra", "effort": "high"},
     },
 }

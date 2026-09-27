@@ -317,6 +317,7 @@ def report(rows: Sequence[Mapping[str, Any]], *, host: str = "hermes", min_cell:
         "projected_lanes": int(projected_total), "projected_always_top": int(top_total),
         "default_target": default_target, "top_target": top_target,
         "lanes_vs_default": round(projected_total / default_total - 1, 3) if default_total else None,
+        "lanes_vs_as_ran": round(projected_total / actual_total - 1, 3) if actual_total else None,
         "lanes_vs_always_top": round(projected_total / top_total - 1, 3) if top_total else None,
     }
     if unmeasured:
