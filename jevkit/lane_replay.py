@@ -339,3 +339,123 @@ def read_jsonl(path: Any) -> List[Dict[str, Any]]:
         if line:
             rows.append(json.loads(line))
     return rows
+
+# ── Claude Code: delegated subagent runs from local transcripts ────────────────
+
+# $ per million tokens: input, output, cache read, cache write (5 min). Anthropic list prices,
+# 2026-09; re-check before quoting. Matched on a substring of the model id, longest first.
+CLAUDE_PRICES = {
+    "fable": (10.0, 50.0, 1.0, 12.5), "opus-5-5": (4.0, 20.0, 0.2, 5.0), "opus-5": (5.0, 25.0, 0.5, 6.25),
+    "opus-4": (5.0, 25.0, 0.5, 6.25), "sonnet-5": (2.0, 10.0, 0.2, 2.5), "sonnet-4": (3.0, 15.0, 0.3, 3.75),
+    "haiku-4-5": (1.0, 5.0, 0.1, 1.25),
+}
+CLAUDE_ALIASES = {"haiku": "claude-haiku-4-5", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}
+
+
+def claude_price(model: str) -> Optional[tuple]:
+    model = CLAUDE_ALIASES.get(model, model)
+    for key in sorted(CLAUDE_PRICES, key=len, reverse=True):
+        if key in (model or ""):
+            return CLAUDE_PRICES[key]
+    return None
+
+
+def claude_cost(usage: Mapping[str, int], model: str) -> Optional[float]:
+    price = claude_price(model)
+    if not price:
+        return None
+    return round((usage.get("input", 0) * price[0] + usage.get("output", 0) * price[1]
+                  + usage.get("cache_read", 0) * price[2] + usage.get("cache_write", 0) * price[3]) / 1e6, 6)
+
+
+def _first_text(message: Any) -> str:
+    content = message.get("content") if isinstance(message, Mapping) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(block.get("text") or "") for block in content
+                         if isinstance(block, Mapping) and block.get("type") == "text")
+    return ""
+
+
+def build_claude_rows(projects: Any, *, body_chars: int = 3_000) -> List[Dict[str, Any]]:
+    """One row per delegated subagent run found under a Claude Code ``projects`` folder.
+
+    The task is the prompt the subagent was given; usage is summed once per API message (a
+    message is logged once per content block); nothing is sent anywhere.
+    """
+    rows: List[Dict[str, Any]] = []
+    for path in sorted(Path(projects).expanduser().rglob("*.jsonl")):
+        if "subagents" not in path.parts:
+            continue
+        task, models, effort, seen = "", defaultdict(int), None, set()
+        usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        turns = 0
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            message = entry.get("message") if isinstance(entry, Mapping) else None
+            if not isinstance(message, Mapping):
+                continue
+            if not task and entry.get("type") == "user":
+                task = _first_text(message).strip()
+            effort = entry.get("effort") or effort
+            model = message.get("model")
+            used = message.get("usage")
+            key = message.get("id") or entry.get("requestId")
+            if model and not str(model).startswith("<") and isinstance(used, Mapping) and key not in seen:
+                seen.add(key)
+                turns += 1
+                models[model] += 1
+                usage["input"] += int(used.get("input_tokens") or 0)
+                usage["output"] += int(used.get("output_tokens") or 0)
+                usage["cache_read"] += int(used.get("cache_read_input_tokens") or 0)
+                usage["cache_write"] += int(used.get("cache_creation_input_tokens") or 0)
+        if not task or not models:
+            continue
+        model = max(models, key=models.get)
+        rows.append({"id": path.stem, "state": {"task": task[:body_chars]}, "model": model, "effort": effort,
+                     "turns": turns, **{f"{k}_tokens": v for k, v in usage.items()},
+                     "tokens": usage["input"] + usage["output"] + usage["cache_write"],
+                     "cost_usd": claude_cost(usage, model), "workflow": "workflows" in path.parts})
+    return rows
+
+
+def claude_report(rows: Sequence[Mapping[str, Any]], *, top: str = "escalate") -> Dict[str, Any]:
+    """Cost by lane at each lane's model against running every task on the top lane's model.
+
+    Token counts are held equal across models, which flatters nothing: a smaller model that
+    needs more turns would cost more than shown, so parity must come from a controlled replay.
+    """
+    mapped = lanes.targets("claude-code")
+    top_model = mapped[top]["model"]
+    out: Dict[str, Any] = {"runs": len(rows), "lanes": {}, "lane_map": mapped}
+    total_ran = total_lanes = total_top = 0.0
+    for lane in lanes.LANES + ("keep_current",):
+        members = [r for r in rows if (r.get("decision") or {}).get("action") == lane]
+        if not members:
+            continue
+
+        def priced(row: Mapping[str, Any], model: str) -> float:
+            usage = {k: int(row.get(f"{k}_tokens") or 0) for k in ("input", "output", "cache_read", "cache_write")}
+            return claude_cost(usage, model) or 0.0
+        ran = sum(float(r.get("cost_usd") or 0) for r in members)
+        target = (mapped.get(lane) or {}).get("model")
+        at_lane = sum(priced(r, target) if target else float(r.get("cost_usd") or 0) for r in members)
+        at_top = sum(priced(r, top_model) for r in members)
+        total_ran, total_lanes, total_top = total_ran + ran, total_lanes + at_lane, total_top + at_top
+        out["lanes"][lane] = {"runs": len(members), "share": round(len(members) / len(rows), 3),
+                              "cost_as_ran": round(ran, 2), "cost_at_lane_model": round(at_lane, 2),
+                              "cost_always_top": round(at_top, 2), "models_ran": _count(r.get("model") for r in members),
+                              "tokens": sum(int(r.get("tokens") or 0) + int(r.get("cache_read_tokens") or 0) for r in members)}
+    out["totals"] = {"cost_as_ran": round(total_ran, 2), "cost_lanes": round(total_lanes, 2),
+                     "cost_always_top": round(total_top, 2),
+                     "lanes_vs_always_top": round(total_lanes / total_top - 1, 3) if total_top else None,
+                     "lanes_vs_as_ran": round(total_lanes / total_ran - 1, 3) if total_ran else None}
+    return out

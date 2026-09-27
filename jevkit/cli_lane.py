@@ -69,9 +69,14 @@ def cmd_lane(args: Any) -> int:
             up = lanes.next_lane(args.lane)
             return _out({"from": args.lane, "lane": up or "person",
                          "target": lanes.targets(args.host).get(up) if up else None})
+        if args.action == "replay-build" and args.claude_projects:
+            if not args.out:
+                return _bad("give --out")
+            count = lane_replay.write_rows(lane_replay.build_claude_rows(args.claude_projects), args.out)
+            return _out({"rows": count, "out": args.out})
         if args.action == "replay-build":
             if not (args.kanban_db and args.hermes_root and args.out):
-                return _bad("give --kanban-db, --hermes-root and --out")
+                return _bad("give --kanban-db, --hermes-root and --out (or --claude-projects and --out)")
             import time as _time
             since = _time.time() - args.days * 86400 if args.days else None
             rows = lane_replay.build_rows(args.kanban_db, args.hermes_root, since=since, limit=args.limit)
@@ -81,8 +86,10 @@ def cmd_lane(args: Any) -> int:
         if args.action == "replay-report":
             if not args.rows:
                 return _bad("give --rows (the output of jev batch --policy lane)")
-            return _out(lane_replay.report(lane_replay.read_jsonl(args.rows), host=args.host,
-                                           min_cell=args.min_cell, top=args.top_effort))
+            rows = lane_replay.read_jsonl(args.rows)
+            if args.host == "claude-code":
+                return _out(lane_replay.claude_report(rows))
+            return _out(lane_replay.report(rows, host=args.host, min_cell=args.min_cell, top=args.top_effort))
         if args.action == "evidence":
             found = lanes.evidence(args.repo, runs=args.run or (), scope=args.scope or (), base=args.base,
                                    expects_changes=not args.no_changes_expected, timeout=args.check_timeout)
@@ -138,6 +145,7 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("--mode", choices=list(engine.MODES), default="live")
     p.add_argument("--timeout", type=float, default=4.0)
     p.add_argument("--kanban-db", help="replay-build: the fleet's kanban.db (opened read-only)")
+    p.add_argument("--claude-projects", help="replay-build: a Claude Code projects folder (subagent transcripts)")
     p.add_argument("--hermes-root", help="replay-build: the Hermes root holding profiles/*/state.db")
     p.add_argument("--out", help="replay-build: where the rows go")
     p.add_argument("--days", type=float, default=0, help="replay-build: only tasks created in the last N days")
