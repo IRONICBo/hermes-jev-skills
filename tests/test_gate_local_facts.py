@@ -80,5 +80,18 @@ class GateAskPolicy(TempHome):
         self.assertEqual(out["action"], "no_opinion")
 
 
+
+class ReplayUsesTheLiveFacts(TempHome):
+    def test_a_replayed_credential_read_is_decided_by_code(self):
+        import tempfile
+        from jevkit import cli_decide
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "rows.jsonl"
+            src.write_text(json.dumps({"id": "a", "tool": "terminal", "command": READS[0]}) + "\n")
+            rows = cli_decide._gate_rows(str(src))
+        self.assertTrue(rows[0]["facts"]["credential_source"])
+        self.assertNotIn("command", rows[0])
+
+
 if __name__ == "__main__":
     unittest.main()

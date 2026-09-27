@@ -133,6 +133,9 @@ def _gate_rows(path: str) -> List[Dict[str, Any]]:
                                             pattern_keys=raw.get("pattern_keys") or (),
                                             workdir_kind_value=raw.get("workdir_kind") or "unknown",
                                             surface=raw.get("surface"))
+            # The same free facts gate.check computes live, so a replay runs the live pre-rules.
+            text = raw.get("command") if raw.get("command") is not None else json.dumps(raw.get("args"), default=str)
+            raw["facts"] = {**gate.local_facts(text), **(raw.get("facts") or {})}
             raw.pop("command", None)
             raw.pop("args", None)
         rows.append(raw)
