@@ -11,7 +11,7 @@
   outcomes; and uses the existing `jev search` gate rather than adding a scraper or writer.
   The evidence floor is enforced locally and `unknown` follows the no-Jev baseline. Calls send
   the question and query fields plus an explicit public-data projection under the existing
-  search privacy contract. Jev Social v0.1.8 is linked as a related implementation with its
+  search privacy contract. Jev Social v0.1.9 is linked as a related implementation with its
   distinct provider, browser and retention contract disclosed.
 
 - **`jev batch` waits out the per-minute limit instead of skipping rows.** The first replay of real history through the landed engine (six sets, 3,100 rows, 6 workers) came back with 60% of rows `skipped_rate`: the shared limiter admits 800 shadow calls a minute and the batch ran faster. A patient caller now sleeps to the next minute (at most 5 times) and asks again; live callers still skip at once, and the daily dollar cap is never waited out. `jev gate replay --report` now also counts `no_opinion` rows, so a catch rate over rows Jev never judged cannot read as a pass.
