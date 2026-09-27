@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **New `jev-social-research` skill:** a bounded workflow for social evidence research that
+  keeps discovery cards distinct from opened posts, comments and observed media; deduplicates
+  canonical sources; preserves source-linked evidence and honest complete/partial/blocked
+  outcomes; and uses the existing `jev search` gate rather than adding a scraper or writer.
+  The evidence floor is enforced locally and `unknown` follows the no-Jev baseline. Calls send
+  the question and query fields plus an explicit public-data projection under the existing
+  search privacy contract. Jev Social v0.1.8 is linked as a related implementation with its
+  distinct provider, browser and retention contract disclosed.
+
 - **`jev batch` waits out the per-minute limit instead of skipping rows.** The first replay of real history through the landed engine (six sets, 3,100 rows, 6 workers) came back with 60% of rows `skipped_rate`: the shared limiter admits 800 shadow calls a minute and the batch ran faster. A patient caller now sleeps to the next minute (at most 5 times) and asks again; live callers still skip at once, and the daily dollar cap is never waited out. `jev gate replay --report` now also counts `no_opinion` rows, so a catch rate over rows Jev never judged cannot read as a pass.
 
 - GUI daily-use guard and live smoke: planned AX click/type steps now read back state before proceeding, stopping as `action_unverified` after one bounded settle when a driver acknowledgement leaves the window unchanged. A standalone macOS AppKit fixture smoke exercises the **bundled** Jev+Cua runner twice, with process cleanup and one activation/title-transition assertion per run. Fixture success does not establish Epic Launcher custom UI support; Epic navigation remains unverified.
