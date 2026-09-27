@@ -273,14 +273,15 @@ def report(rows: Sequence[Mapping[str, Any]], *, host: str = "hermes", min_cell:
             return 1.0
         return table[target]["multiplier"] / table[ran]["multiplier"]
 
-    def moved(row: Mapping[str, Any], target: Optional[Mapping[str, str]], effort: Optional[str] = None) -> float:
+    def moved(row: Mapping[str, Any], target: Optional[Mapping[str, str]]) -> float:
         tokens = float(row.get("tokens") or 0)
-        if not target and not effort:
+        if not target:
             return tokens
-        factor = ratio(mult, _first_effort(row), effort or (target or {}).get("effort"))
-        if target and not effort:
-            factor *= ratio(models, _only_model(row), target.get("model"))
-        return tokens * factor
+        return (tokens * ratio(mult, _first_effort(row), target.get("effort"))
+                * ratio(models, _only_model(row), target.get("model")))
+
+    default_target = mapped.get("medium")
+    top_target = mapped.get(top) if top in mapped else {**(default_target or {}), "effort": top}
 
     by_lane: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -288,12 +289,14 @@ def report(rows: Sequence[Mapping[str, Any]], *, host: str = "hermes", min_cell:
     order = lanes.LANES + ("keep_current", "unknown")
     out: Dict[str, Any] = {"tasks": len(rows), "host": host, "lane_map": mapped, "effort_multipliers": mult,
                            "model_multipliers": models, "lanes": {}, "sources": _count((r.get("decision") or {}).get("source") for r in rows)}
-    actual_total = projected_total = top_total = 0.0
+    actual_total = projected_total = top_total = default_total = 0.0
     for lane in sorted(by_lane, key=lambda name: order.index(name) if name in order else 99):
         members = by_lane[lane]
         actual = sum(float(r.get("tokens") or 0) for r in members)
         projected = sum(moved(r, mapped.get(lane)) for r in members)
-        at_top = sum(moved(r, None, top) for r in members)
+        at_top = sum(moved(r, top_target) for r in members)
+        at_default = sum(moved(r, default_target) for r in members)
+        default_total += at_default
         actual_total += actual
         projected_total += projected
         top_total += at_top
@@ -303,15 +306,17 @@ def report(rows: Sequence[Mapping[str, Any]], *, host: str = "hermes", min_cell:
         out["lanes"][lane] = {
             "tasks": len(members), "share": round(len(members) / len(rows), 3) if rows else None,
             "target": mapped.get(lane), "actual_tokens": int(actual),
-            "projected_tokens_at_lane_effort": int(projected), "projected_tokens_always_top": int(at_top),
+            "projected_tokens_at_lane_target": int(projected), "projected_tokens_all_default": int(at_default),
+            "projected_tokens_always_top": int(at_top),
             "success_all": _rate(members),
             "success_by_effort_it_ran_at": {e: _rate(c) for e, c in sorted(by_effort.items())},
             "models": _count(m for r in members for m in (r.get("models") or [])),
         }
     out["totals"] = {
-        "actual_tokens": int(actual_total), "projected_tokens_lanes": int(projected_total),
-        "projected_tokens_always_top": int(top_total),
-        "lanes_vs_actual": round(projected_total / actual_total - 1, 3) if actual_total else None,
+        "actual_tokens_as_ran": int(actual_total), "projected_all_default": int(default_total),
+        "projected_lanes": int(projected_total), "projected_always_top": int(top_total),
+        "default_target": default_target, "top_target": top_target,
+        "lanes_vs_default": round(projected_total / default_total - 1, 3) if default_total else None,
         "lanes_vs_always_top": round(projected_total / top_total - 1, 3) if top_total else None,
     }
     if unmeasured:
